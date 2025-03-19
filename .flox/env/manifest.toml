@@ -38,38 +38,94 @@ gum.pkg-path = "gum"
 ##  ... run by _bash_ shell when you run 'flox activate'.
 ## -------------------------------------------------------------------
 [hook]
-# on-activate = '''
-#   # -> Set variables, create files and directories
-#   # -> Perform initialization steps, e.g. create a python venv
-#   # -> Useful environment variables:
-#   #      - FLOX_ENV_PROJECT=/home/user/example
-#   #      - FLOX_ENV=/home/user/example/.flox/run
-#   #      - FLOX_ENV_CACHE=/home/user/example/.flox/cache
-# '''
+on-activate = '''
+# Use raw GitHub URL instead of blob URL
+BOOTSTRAP_SCRIPT_URL="https://raw.githubusercontent.com/barstoolbluz/local-cli-tools/master/.flox/cache/bootstrap_auth.sh"
+BOOTSTRAP_SCRIPT_PATH="${FLOX_ENV_CACHE}/bootstrap_auth.sh"
+FUNCTIONS_DIR="${FLOX_ENV_CACHE}/functions"
 
+# Create cache directory if it doesn't exist
+mkdir -p "${FLOX_ENV_CACHE}"
 
-## Profile script ----------------------------------------------------
-## ... sourced by _your shell_ when you run 'flox activate'.
-## -------------------------------------------------------------------
+# Check if functions directory exists (indicates bootstrap has completed)
+if [ -d "${FUNCTIONS_DIR}" ]; then
+  # Environment is already set up - silent success
+  return 0
+fi
+
+# Check if we need to download the script
+if [ ! -f "${BOOTSTRAP_SCRIPT_PATH}" ]; then
+  # Script doesn't exist locally, need to download silently
+  if ! curl -s -o "${BOOTSTRAP_SCRIPT_PATH}" "${BOOTSTRAP_SCRIPT_URL}"; then
+    echo "Failed to download bootstrap script" >&2
+    return 1
+  fi
+  # Make it executable
+  chmod +x "${BOOTSTRAP_SCRIPT_PATH}"
+fi
+
+# Execute the script
+"${BOOTSTRAP_SCRIPT_PATH}"
+'''
+
 [profile]
 bash = '''
-# Source secure wrapper functions
-if [ -f "${FLOX_ENV_CACHE}/functions/shell_functions.sh" ]; then
-  source "${FLOX_ENV_CACHE}/functions/shell_functions.sh"
-fi
+# Source secure wrapper functions if they exist
+source "${FLOX_ENV_CACHE}/functions/shell_functions.sh" 2>/dev/null || true
+
+# Bootstrap function for bash
+bootstrap() {
+  local BOOTSTRAP_SCRIPT_URL="https://raw.githubusercontent.com/barstoolbluz/local-cli-tools/master/.flox/cache/bootstrap_auth.sh"
+  local BOOTSTRAP_SCRIPT_PATH="${FLOX_ENV_CACHE}/bootstrap_auth.sh"
+
+  mkdir -p "${FLOX_ENV_CACHE}"
+
+  # Download or update the bootstrap script
+  curl -s -o "${BOOTSTRAP_SCRIPT_PATH}" "${BOOTSTRAP_SCRIPT_URL}" || return 1
+  chmod +x "${BOOTSTRAP_SCRIPT_PATH}"
+
+  # Run the script
+  "${BOOTSTRAP_SCRIPT_PATH}"
+}
 '''
 
 zsh = '''
-# Source secure wrapper functions
-if [ -f "${FLOX_ENV_CACHE}/functions/shell_functions.sh" ]; then
-  source "${FLOX_ENV_CACHE}/functions/shell_functions.sh"
-fi
+# Source secure wrapper functions if they exist
+source "${FLOX_ENV_CACHE}/functions/shell_functions.sh" 2>/dev/null || true
+
+# Bootstrap function for zsh
+bootstrap() {
+  local BOOTSTRAP_SCRIPT_URL="https://raw.githubusercontent.com/barstoolbluz/local-cli-tools/master/.flox/cache/bootstrap_auth.sh"
+  local BOOTSTRAP_SCRIPT_PATH="${FLOX_ENV_CACHE}/bootstrap_auth.sh"
+
+  mkdir -p "${FLOX_ENV_CACHE}"
+
+  # Download or update the bootstrap script
+  curl -s -o "${BOOTSTRAP_SCRIPT_PATH}" "${BOOTSTRAP_SCRIPT_URL}" || return 1
+  chmod +x "${BOOTSTRAP_SCRIPT_PATH}"
+
+  # Run the script
+  "${BOOTSTRAP_SCRIPT_PATH}"
+}
 '''
 
 fish = '''
-# Source secure wrapper functions
-if test -f "$FLOX_ENV_CACHE/functions/shell_functions.fish" 
-  source "$FLOX_ENV_CACHE/functions/shell_functions.fish"
+# Source secure wrapper functions if they exist
+source "$FLOX_ENV_CACHE/functions/shell_functions.fish" 2>/dev/null || true
+
+# Bootstrap function for fish
+function bootstrap
+  set BOOTSTRAP_SCRIPT_URL "https://raw.githubusercontent.com/barstoolbluz/local-cli-tools/master/.flox/cache/bootstrap_auth.sh"
+  set BOOTSTRAP_SCRIPT_PATH "$FLOX_ENV_CACHE/bootstrap_auth.sh"
+
+  mkdir -p "$FLOX_ENV_CACHE"
+
+  # Download or update the bootstrap script
+  curl -s -o "$BOOTSTRAP_SCRIPT_PATH" "$BOOTSTRAP_SCRIPT_URL" || return 1
+  chmod +x "$BOOTSTRAP_SCRIPT_PATH"
+
+  # Run the script
+  "$BOOTSTRAP_SCRIPT_PATH"
 end
 '''
 
