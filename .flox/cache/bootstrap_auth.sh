@@ -363,7 +363,6 @@ bootstrap_aws_auth() {
 # --------------------------------
 
 # Function to configure Git credentials without GitHub
-# Function to configure Git credentials without GitHub
 configure_git_credentials() {
   # Check if Git's credential.helper is already configured
   local current_helper=$(git config --global --get credential.helper)
@@ -428,7 +427,7 @@ generate_shell_functions() {
   # ------------------------------------
   cat > "${FLOX_ENV_CACHE}/functions/shell_functions.sh" << 'EOF'
 # AWS CLI wrapper with just-in-time credential injection
-aws_secure() {
+aws() {
   # Get credentials just-in-time
   local aws_creds=$(get_from_keychain "aws" "$USER")
   local aws_access_key_id=$(echo "$aws_creds" | jq -r '.aws_access_key_id' 2>/dev/null || echo "")
@@ -443,48 +442,110 @@ aws_secure() {
   # This does NOT export to the environment, only to this command
   AWS_ACCESS_KEY_ID="$aws_access_key_id" \
   AWS_SECRET_ACCESS_KEY="$aws_secret_access_key" \
-  aws "$@"
-}
-
-# GitHub CLI wrapper with just-in-time token injection
-gh_secure() {
-  # Get token just-in-time
-  local token=$(get_from_keychain "github" "$USER")
-  
-  if [[ -z "$token" ]]; then
-    echo "No GitHub token found in keychain. Run 'gh auth login' first." >&2
-    return 1
-  fi
-  
-  # Run command with temporary environment - ONLY for this command
-  GITHUB_TOKEN="$token" \
-  GH_TOKEN="$token" \
-  gh "$@"
+  command aws "$@"
 }
 
 # Git wrapper for non-GitHub repositories
-git_secure() {
-  # Check if we're in a GitHub repo
-  if git remote -v 2>/dev/null | grep -q 'github.com'; then
-    # Use GitHub token for GitHub repos
-    local token=$(get_from_keychain "github" "$USER")
+git() {
+  # Debug function for troubleshooting
+  debug_git() {
+    [[ -n "$FLOX_DEBUG" ]] && echo "[DEBUG] $*" >&2
+  }
+  
+  # For clone operations, directly handle GitHub URLs
+  if [[ "$1" == "clone" && "$2" == *"github.com"* ]]; then
+    debug_git "GitHub clone detected"
+    
+    # Try to get token from GitHub CLI first (most reliable)
+    local token=""
+    if command -v gh &>/dev/null && gh auth status &>/dev/null; then
+      token=$(gh auth token 2>/dev/null)
+      debug_git "Got token from GitHub CLI"
+    fi
+    
+    # Fallback to our keychain if gh auth token failed
+    if [[ -z "$token" ]]; then
+      token=$(get_credential "github" "$USER" 2>/dev/null)
+      debug_git "Used keychain token"
+    fi
+    
     if [[ -n "$token" ]]; then
-      GIT_ASKPASS="echo" \
-      GIT_USERNAME="token" \
-      GIT_PASSWORD="$token" \
-      git "$@"
+      debug_git "Using token for authentication"
+      
+      # Create modified URL with token embedded
+      local orig_url="$2"
+      local auth_url="https://oauth2:${token}@${orig_url#https://}"
+      
+      debug_git "Original URL: $orig_url"
+      debug_git "Auth URL format: https://oauth2:***@${orig_url#https://}"
+      
+      # Use printf to avoid issues with special characters in the token
+      printf -v cmd_str "%s %s %s" "command git clone" "$auth_url" "${*:3}"
+      eval "$cmd_str"
       return $?
+    else
+      debug_git "No token found, proceeding with regular git"
+    fi
+  # For other GitHub operations
+  elif command git rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
+    if command git remote -v 2>/dev/null | grep -q 'github.com'; then
+      debug_git "GitHub repository operation detected"
+      
+      # Try to get token from GitHub CLI first
+      local token=""
+      if command -v gh &>/dev/null && gh auth status &>/dev/null; then
+        token=$(gh auth token 2>/dev/null)
+      fi
+      
+      # Fallback to our keychain
+      if [[ -z "$token" ]]; then
+        token=$(get_credential "github" "$USER" 2>/dev/null)
+      fi
+      
+      if [[ -n "$token" ]]; then
+        debug_git "Using token for GitHub operation"
+        
+        # Create a temporary script that outputs the password
+        local askpass_script=$(mktemp)
+        echo '#!/bin/sh
+echo "$GIT_PASSWORD"' > "$askpass_script"
+        chmod +x "$askpass_script"
+        
+        # Run git with properly configured environment
+        GIT_ASKPASS="$askpass_script" \
+        GIT_USERNAME="oauth2" \
+        GIT_PASSWORD="$token" \
+        command git "$@"
+        
+        local ret=$?
+        
+        # Clean up
+        rm -f "$askpass_script"
+        return $ret
+      fi
     fi
   fi
   
-  # For non-GitHub repos or if no token found, fall back to normal git
-  git "$@"
+  # Default case: run git normally
+  debug_git "Using standard git command"
+  command git "$@"
 }
 
-# Helper function to access keychain/keyring (simplified version)
+# Helper function to access keychain/keyring
 get_from_keychain() {
   local service="$1"
   local username="$2"
+  
+  # If GitHub is the service and gh CLI is available, try that first
+  if [[ "$service" == "github" ]] && command -v gh &>/dev/null; then
+    if gh auth status &>/dev/null; then
+      gh auth token 2>/dev/null
+      local gh_status=$?
+      if [[ $gh_status -eq 0 ]]; then
+        return 0
+      fi
+    fi
+  fi
   
   # Determine platform and use appropriate keychain method
   if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -510,7 +571,7 @@ EOF
   # ------------------------------------
   cat > "${FLOX_ENV_CACHE}/functions/shell_functions.fish" << 'EOF'
 # AWS CLI wrapper with just-in-time credential injection
-function aws_secure
+function aws
   # Get credentials just-in-time
   set -l aws_creds (get_from_keychain "aws" "$USER")
 
@@ -526,47 +587,116 @@ function aws_secure
   # Run command with credentials ONLY for this command
   env AWS_ACCESS_KEY_ID="$aws_access_key_id" \
       AWS_SECRET_ACCESS_KEY="$aws_secret_access_key" \
-      aws $argv
+      command aws $argv
 end
 
-# GitHub CLI wrapper with just-in-time token injection
-function gh_secure
-  # Get token just-in-time
-  set -l token (get_from_keychain "github" "$USER")
-
-  if test -z "$token"
-    echo "No GitHub token found in keychain. Run 'gh auth login' first." >&2
-    return 1
-  end
-
-  # Run command with temporary environment - ONLY for this command
-  env GITHUB_TOKEN="$token" \
-      GH_TOKEN="$token" \
-      gh $argv
-end
-
-function git_secure
-  # Check if we're in a GitHub repo
-  if git remote -v 2>/dev/null | grep -q 'github.com'
-    # Use GitHub token for GitHub repos
-    set -l token (get_from_keychain "github" "$USER")
-    if test -n "$token"
-      env GIT_ASKPASS="echo" \
-          GIT_USERNAME="token" \
-          GIT_PASSWORD="$token" \
-          git $argv
-      return $status
+function git
+  # Debug function for troubleshooting
+  function debug_git
+    if set -q FLOX_DEBUG
+      echo "[DEBUG] $argv" >&2
     end
   end
-
-  # For non-GitHub repos or if no token found, fall back to normal git
-  git $argv
+  
+  # For clone operations, directly handle GitHub URLs
+  if test "$argv[1]" = "clone"; and string match -q "*github.com*" "$argv[2]"
+    debug_git "GitHub clone detected"
+    
+    # Try to get token from GitHub CLI first (most reliable)
+    set -l token ""
+    if type -q gh; and gh auth status &>/dev/null
+      set token (gh auth token 2>/dev/null)
+      debug_git "Got token from GitHub CLI"
+    end
+    
+    # Fallback to our keychain if gh auth token failed
+    if test -z "$token"
+      set token (get_credential "github" "$USER" 2>/dev/null)
+      debug_git "Used keychain token"
+    end
+    
+    if test -n "$token"
+      debug_git "Using token for authentication"
+      
+      # Create modified URL with token embedded
+      set -l orig_url "$argv[2]"
+      set -l auth_url "https://oauth2:$token@"(string replace "https://" "" "$orig_url")
+      
+      debug_git "Original URL: $orig_url"
+      debug_git "Auth URL format: https://oauth2:***@"(string replace "https://" "" "$orig_url")
+      
+      # Build new command arguments
+      set -l new_argv $argv[1] "$auth_url"
+      if test (count $argv) -gt 2
+        set -a new_argv $argv[3..-1]
+      end
+      
+      debug_git "Running: git clone [AUTH_URL] $argv[3..-1]"
+      command git $new_argv
+      return $status
+    else
+      debug_git "No token found, proceeding with regular git"
+    end
+  # For other GitHub operations
+  else if command git rev-parse --is-inside-work-tree &>/dev/null 2>&1
+    if command git remote -v 2>/dev/null | grep -q 'github.com'
+      debug_git "GitHub repository operation detected"
+      
+      # Try to get token from GitHub CLI first
+      set -l token ""
+      if type -q gh; and gh auth status &>/dev/null
+        set token (gh auth token 2>/dev/null)
+      end
+      
+      # Fallback to our keychain
+      if test -z "$token"
+        set token (get_credential "github" "$USER" 2>/dev/null)
+      end
+      
+      if test -n "$token"
+        debug_git "Using token for GitHub operation"
+        
+        # Create a temporary script that outputs the password
+        set -l askpass_script (mktemp)
+        echo '#!/bin/sh
+echo "$GIT_PASSWORD"' > "$askpass_script"
+        chmod +x "$askpass_script"
+        
+        # Run git with properly configured environment
+        env GIT_ASKPASS="$askpass_script" \
+            GIT_USERNAME="oauth2" \
+            GIT_PASSWORD="$token" \
+            command git $argv
+        
+        set -l ret $status
+        
+        # Clean up
+        rm -f "$askpass_script"
+        return $ret
+      end
+    end
+  end
+  
+  # Default case: run git normally
+  debug_git "Using standard git command"
+  command git $argv
 end
 
-# Helper function to access keychain/keyring (simplified version)
+# Helper function to access keychain/keyring
 function get_from_keychain
   set -l service $argv[1]
   set -l username $argv[2]
+  
+  # If GitHub is the service and gh CLI is available, try that first
+  if test "$service" = "github"; and type -q gh
+    if gh auth status &>/dev/null
+      set -l token (gh auth token 2>/dev/null)
+      if test $status -eq 0
+        echo $token
+        return 0
+      end
+    end
+  end
   
   # Determine platform and use appropriate keychain method
   switch (uname)
